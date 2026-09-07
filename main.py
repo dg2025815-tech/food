@@ -1,92 +1,91 @@
-import urllib.request
-import json
+import streamlit as st
 import pandas as pd
+import requests
 import re
+from datetime import datetime
 
-# 1. 학교 코드 및 관할 교육청 설정
-# B10: 서울특별시교육청
-ATPT_OFCDC_SC_CODE = "B10" 
-API_KEY = "YOUR_API_KEY"  # 나이스 오픈API 키 (없을 경우 공백 처리 가능하나 조회 제한이 있을 수 있음)
+# 1. 스트림릿 기본 페이지 설정
+st.set_page_config(
+    page_title="학교 급식 정보 조회",
+    page_icon="🍱",
+    layout="centered"
+)
 
-# 학교 코드 매핑
-SCHOOL_CODES = {
-    "7010073": "당곡고등학교",
-    "7010193": "성남고등학교",
-    "7010090": "수도여자고등학교"
+# 2. 학교 정보 및 관할 교육청 설정 (서울시교육청: B10)
+SCHOOL_MAP = {
+    "성남고등학교": "7010193",
+    "당곡고등학교": "7010073",
+    "수도여자고등학교": "7010090"
 }
+ATPT_CODE = "B10"
 
-def clean_menu_string(text):
-    """급식 메뉴 내 알레르기 유발물질 번호 및 기타 특수문자 제거 함수"""
-    if not isinstance(text, str):
+# 3. 메뉴 정제 함수 (알레르기 번호 및 태그 제거)
+def clean_menu(text):
+    if not text:
         return ""
-    # 메뉴명 뒤의 <br/> 태그 및 알레르기 원산지 정보 번호 제거
     cleaned = re.sub(r'<br\s*/?>', '\n', text)
     cleaned = re.sub(r'\([0-9\.]+\)', '', cleaned)
     return cleaned.strip()
 
-def fetch_school_meals(school_code, start_date, end_date):
-    """
-    특정 학교의 급식 정보를 API로 조회합니다.
-    start_date / end_date 포맷: 'YYYYMMDD' (예: '20240301')
-    """
-    base_url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
-    params = (
-        f"?KEY={API_KEY}"
-        f"&Type=json"
-        f"&pIndex=1"
-        f"&pSize=1000"
-        f"&ATPT_OFCDC_SC_CODE={ATPT_OFCDC_SC_CODE}"
-        f"&SD_SCHUL_CODE={school_code}"
-        f"&MLSV_FROM_YMD={start_date}"
-        f"&MLSV_TO_YMD={end_date}"
-    )
-    
-    url = base_url + params
+# 4. 나이스 API 데이터 조회 함수 (캐싱 적용)
+@st.cache_data(ttl=3600)
+def fetch_meal_data(school_code, start_date, end_date):
+    url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
+    params = {
+        "Type": "json",
+        "pIndex": 1,
+        "pSize": 100,
+        "ATPT_OFCDC_SC_CODE": ATPT_CODE,
+        "SD_SCHUL_CODE": school_code,
+        "MLSV_FROM_YMD": start_date,
+        "MLSV_TO_YMD": end_date
+    }
     
     try:
-        req = urllib.request.urlopen(url)
-        res = req.read().decode('utf-8')
-        data = json.loads(res)
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
         
         if "mealServiceDietInfo" in data:
             rows = data["mealServiceDietInfo"][1]["row"]
             df = pd.DataFrame(rows)
-            
-            # 메뉴 가공
-            df['DDISH_NM_CLEAN'] = df['DDISH_NM'].apply(clean_menu_string)
+            df['DDISH_CLEAN'] = df['DDISH_NM'].apply(clean_menu)
             return df
-        else:
-            print(f"[{SCHOOL_CODES.get(school_code, school_code)}] 해당 기간 내 급식 데이터가 없습니다.")
-            return pd.DataFrame()
-            
+        return pd.DataFrame()
     except Exception as e:
-        print(f"데이터 수집 중 오류 발생 ({school_code}): {e}")
+        st.error(f"데이터를 불러오는 중 오류 발생: {e}")
         return pd.DataFrame()
 
-# 2. 3개 고등학교 데이터 일괄 수집 실행
-start_ymd = "20240301"  # 조회 시작일
-end_ymd = "20240331"    # 조회 종료일
+# 5. 메인 UI 화면
+st.title("🍱 고등학교 급식 메뉴 조회")
+st.write("성남고, 당곡고, 수도여고의 급식 정보를 확인하세요.")
 
-df_list = []
-for code in SCHOOL_CODES.keys():
-    df_school = fetch_school_meals(code, start_ymd, end_ymd)
-    if not df_school.empty:
-        df_list.append(df_school)
+col1, col2 = st.columns(2)
+with col1:
+    selected_school_name = st.selectbox("학교 선택", list(SCHOOL_MAP.keys()))
+with col2:
+    selected_date = st.date_input("날짜 선택", datetime.now())
 
-# 3. 데이터 합치기 및 컬럼 정리
-if df_list:
-    total_df = pd.concat(df_list, ignore_index=True)
-    
-    # 핵심 컬럼 재정렬
-    selected_cols = {
-        'SD_SCHUL_CODE': '학교코드',
-        'SCHUL_NM': '학교명',
-        'MLSV_YMD': '급식일자',
-        'MMEAL_SC_NM': '식사구분',  # 중식/석식
-        'DDISH_NM_CLEAN': '메뉴',
-        'CAL_INFO': '열량(kcal)',
-        'NTR_INFO': '영양정보'
-    }
-    
-    result_df = total_df[list(selected_cols.keys())].rename(columns=selected_cols)
-    print(result_df.head(10))
+ymd = selected_date.strftime("%Y%m%d")
+school_code = SCHOOL_MAP[selected_school_name]
+
+if st.button("급식 조회", use_container_width=True):
+    with st.spinner("급식 정보를 조회 중입니다..."):
+        df_meal = fetch_meal_data(school_code, ymd, ymd)
+        
+        if not df_meal.empty:
+            for _, row in df_meal.iterrows():
+                meal_type = row.get('MMEAL_SC_NM', '급식')
+                cal_info = row.get('CAL_INFO', '정보 없음')
+                menu_text = row.get('DDISH_CLEAN', '메뉴 정보 없음')
+                
+                st.success(f"**{selected_school_name} - {meal_type}**")
+                st.caption(f"🔥 열량: {cal_info}")
+                st.markdown("---")
+                
+                # 메뉴 리스트 출력
+                menus = menu_text.split('\n')
+                for m in menus:
+                    if m.strip():
+                        st.markdown(f"* {m.strip()}")
+        else:
+            st.warning(f"선택한 날짜({selected_date.strftime('%Y-%m-%d')})에는 급식 정보가 없거나 주말/방학입니다.")
