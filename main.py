@@ -1,157 +1,112 @@
+import streamlit as st
+import pandas as pd
 import requests
 import re
-import calendar
 from datetime import datetime
-import pandas as pd
-import matplotlib.pyplot as plt
+import calendar
 
-# 한글 폰트 설정 (그래프 한글 깨짐 방지)
-plt.rcParams['font.family'] = 'Malgun Gothic'  # Windows 기준 (Mac일 경우 'AppleGothic')
-plt.rcParams['axes.unicode_minus'] = False
+# 1. 페이지 설정
+st.set_page_config(
+    page_title="고등학교 월별 급식 정보 조회",
+    page_icon="🍱",
+    layout="wide"
+)
 
-# 1. 학교 정보 설정 (서울시교육청: B10)
+# 2. 학교 정보 설정 (서울시교육청: B10)
 SCHOOL_MAP = {
-    "1": ("성남고등학교", "7010193"),
-    "2": ("당곡고등학교", "7010073"),
-    "3": ("수도여자고등학교", "7010090")
+    "성남고등학교": "7010193",
+    "당곡고등학교": "7010073",
+    "수도여자고등학교": "7010090"
 }
 ATPT_CODE = "B10"
-WEEKDAYS_KOR = ["월", "화", "수", "목", "금", "토", "일"]
 
-# 2. 메뉴 정제 함수 (알레르기 번호 제거)
+# 3. 메뉴 정제 함수 (알레르기 번호 및 태그 제거)
 def clean_menu(text):
     if not text:
         return ""
-    cleaned = re.sub(r'<br\s*/?>', ', ', text)
+    cleaned = re.sub(r'<br\s*/?>', '\n', text)
     cleaned = re.sub(r'\([0-9\.]+\)', '', cleaned)
     return cleaned.strip()
 
-# 3. 칼로리 숫자 추출 함수
-def extract_calories(cal_str):
-    if not isinstance(cal_str, str):
-        return None
-    match = re.search(r'([\d\.]+)', cal_str)
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return None
-    return None
-
-# 4. API 데이터 수집 함수
-def fetch_monthly_meal(school_code, start_ymd, end_ymd, api_key=""):
+# 4. 월 전체 급식 데이터 조회 함수
+@st.cache_data(ttl=3600)
+def fetch_monthly_meal_data(school_code, start_date, end_date):
     url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
     params = {
         "Type": "json",
         "pIndex": 1,
-        "pSize": 100,
+        "pSize": 1000,
         "ATPT_OFCDC_SC_CODE": ATPT_CODE,
         "SD_SCHUL_CODE": school_code,
-        "MLSV_FROM_YMD": start_ymd,
-        "MLSV_TO_YMD": end_ymd
+        "MLSV_FROM_YMD": start_date,
+        "MLSV_TO_YMD": end_date
     }
-    if api_key:
-        params["KEY"] = api_key
-
+    
     try:
-        res = requests.get(url, params=params, timeout=10)
-        data = res.json()
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
         if "mealServiceDietInfo" in data:
             rows = data["mealServiceDietInfo"][1]["row"]
             df = pd.DataFrame(rows)
             df['DDISH_CLEAN'] = df['DDISH_NM'].apply(clean_menu)
-            df['CAL_NUM'] = df['CAL_INFO'].apply(extract_calories)
-            df['DATE_DT'] = pd.to_datetime(df['MLSV_YMD'], format='%Y%m%d')
-            df['DAY_NUM'] = df['DATE_DT'].dt.day
-            df['WEEKDAY_NAME'] = df['DATE_DT'].dt.dayofweek.apply(lambda x: WEEKDAYS_KOR[x])
             return df
         return pd.DataFrame()
     except Exception as e:
-        print(f"❌ 데이터 불러오기 오류: {e}")
+        st.error(f"데이터를 불러오는 중 오류 발생: {e}")
         return pd.DataFrame()
 
-# 5. 요일별 칼로리 막대그래프 생성 함수
-def plot_calorie_chart(df, school_name, year, month):
-    valid_df = df.dropna(subset=['CAL_NUM'])
-    if valid_df.empty:
-        print("\n⚠️ 해당 월의 칼로리 데이터가 없어 그래프를 그릴 수 없습니다.")
-        return
+# 5. UI 구성
+st.title("🍱 고등학교 월별 급식 메뉴 조회")
 
-    # 요일별 평균 계산 (월~금)
-    avg_cal = valid_df.groupby('WEEKDAY_NAME')['CAL_NUM'].mean().reindex(["월", "화", "수", "목", "금"]).dropna()
-    
-    plt.figure(figsize=(8, 5))
-    bars = plt.bar(avg_cal.index, avg_cal.values, color='#ff9f43', edgecolor='#ee5253')
-    
-    # 막대 위에 숫자 표시
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height + 5, f'{height:.1f} kcal', ha='center', va='bottom', fontsize=10)
+col1, col2, col3 = st.columns(3)
 
-    plt.title(f"{school_name} - {year}년 {month}월 요일별 평균 칼로리", fontsize=14, fontweight='bold')
-    plt.xlabel("요일", fontsize=11)
-    plt.ylabel("평균 칼로리 (Kcal)", fontsize=11)
-    plt.ylim(0, max(avg_cal.values) + 150)
-    plt.grid(axis='y', linestyle='--', alpha=0.5)
-    
-    print("\n📊 요일별 평균 칼로리 그래프를 출력합니다... (그래프 창을 닫으면 프로그램이 계속 진행됩니다)")
-    plt.show()
+with col1:
+    selected_school_name = st.selectbox("학교 선택", list(SCHOOL_MAP.keys()))
 
-# 6. 메인 실행 부분
-def main():
-    print("=" * 50)
-    print("🍱 고등학교 월별 급식 달력 & 칼로리 분석기")
-    print("=" * 50)
-    
-    print("\n[학교 선택]")
-    for k, v in SCHOOL_MAP.items():
-        print(f" {k}. {v[0]}")
-    
-    school_choice = input("학교 번호를 선택하세요 (기본 1): ").strip() or "1"
-    school_name, school_code = SCHOOL_MAP.get(school_choice, SCHOOL_MAP["1"])
-    
-    now = datetime.now()
-    year_input = input(f"연도를 입력하세요 (기본 {now.year}): ").strip() or str(now.year)
-    month_input = input(f"월을 입력하세요 (기본 {now.month}): ").strip() or str(now.month)
-    
-    year = int(year_input)
-    month = int(month_input)
-    
-    api_key = input("나이스 API Key (없으면 엔터): ").strip()
-    
-    # 날짜 범위 산출
-    _, last_day = calendar.monthrange(year, month)
-    start_ymd = f"{year}{month:02d}01"
-    end_ymd = f"{year}{month:02d}{last_day:02d}"
-    
-    print(f"\n⏳ {school_name}의 {year}년 {month}월 급식 정보를 조회 중입니다...")
-    df = fetch_monthly_meal(school_code, start_ymd, end_ymd, api_key)
-    
-    if df.empty:
-        print("\n⚠️ 해당 기간에 급식 정보가 없거나 방학/휴교 기간입니다.")
-        return
-    
-    # 1) 요일별 평균 칼로리 그래프 띄우기
-    plot_calorie_chart(df, school_name, year, month)
-    
-    # 2) 터미널에 달력 형태로 메뉴 출력
-    print(f"\n==================== 📅 {year}년 {month}월 급식 달력 ====================")
-    
-    cal_matrix = calendar.monthcalendar(year, month)
-    for week in cal_matrix:
-        for day in week:
-            if day == 0:
-                continue
+now = datetime.now()
+with col2:
+    # 연도 선택 (현재 연도 기준 전후 1년)
+    selected_year = st.selectbox("연도 선택", list(range(now.year - 1, now.year + 2)), index=1)
+
+with col3:
+    # 월 선택
+    selected_month = st.selectbox("월 선택", list(range(1, 13)), index=now.month - 1)
+
+# 선택한 월의 시작일과 마지막일 계산
+_, last_day = calendar.monthrange(selected_year, selected_month)
+start_ymd = f"{selected_year}{selected_month:02d}01"
+end_ymd = f"{selected_year}{selected_month:02d}{last_day:02d}"
+
+school_code = SCHOOL_MAP[selected_school_name]
+
+if st.button(f"{selected_year}년 {selected_month}월 급식 전체 조회", use_container_width=True):
+    with st.spinner("월별 급식 데이터를 불러오는 중입니다..."):
+        df_meal = fetch_monthly_meal_data(school_code, start_ymd, end_ymd)
+        
+        if not df_meal.empty:
+            st.subheader(f"📅 {selected_school_name} - {selected_year}년 {selected_month}월 급식")
             
-            day_data = df[df['DAY_NUM'] == day]
-            if not day_data.empty:
-                cal_info = day_data['CAL_INFO'].values[0]
-                menu_info = day_data['DDISH_CLEAN'].values[0]
-                weekday_str = day_data['WEEKDAY_NAME'].values[0]
+            # 일자순 정렬
+            df_meal['MLSV_YMD'] = pd.to_datetime(df_meal['MLSV_YMD'], format='%Y%m%d')
+            df_meal = df_meal.sort_values(by='MLSV_YMD')
+            
+            # 날짜별 탭 또는 Grid 구성
+            dates = df_meal['MLSV_YMD'].unique()
+            
+            # 날짜별로 펼침 상자(Expander) 형태로 출력
+            for date_val in dates:
+                date_str = pd.to_datetime(date_val).strftime("%Y-%m-%d (%a)")
+                day_meals = df_meal[df_meal['MLSV_YMD'] == date_val]
                 
-                print(f"\n📌 [{year}-{month:02d}-{day:02d} ({weekday_str})] - 🔥 칼로리: {cal_info}")
-                print(f"   메뉴: {menu_info}")
-                print("-" * 60)
-
-if __name__ == "__main__":
-    main()
+                with st.expander(f"📌 {date_str}", expanded=False):
+                    for _, row in day_meals.iterrows():
+                        meal_type = row.get('MMEAL_SC_NM', '급식')
+                        cal_info = row.get('CAL_INFO', '정보 없음')
+                        menu_text = row.get('DDISH_CLEAN', '메뉴 정보 없음')
+                        
+                        st.markdown(f"**[{meal_type}]** - 🔥 {cal_info}")
+                        st.text(menu_text)
+                        st.markdown("---")
+        else:
+            st.warning(f"선택한 {selected_year}년 {selected_month}월에는 급식 정보가 없거나 방학 기간입니다.")
