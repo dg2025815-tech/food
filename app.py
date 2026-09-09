@@ -1,1 +1,1 @@
-streamlit run app.py
+pip install streamlit pandas requests plotly
